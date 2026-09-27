@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import os
 from tqdm import tqdm
 from utils import test_once, print_results_once, save_results
 from model.Base import TransformerEncoder, FNclf, genX
@@ -83,7 +84,17 @@ def train(model, train_data, train_label, test_data, test_label, epochs, optimiz
             if test_res["test_f1_macro"] > best_f1:
                 best_f1 = test_res["test_f1_macro"]
                 best_test = test_res
-                torch.save(auc_test, f"./results/{args.model}/auc/{args.dataset}_r{args.round}_auc.pt")
+                # --- Original save (commented out) ---
+                # torch.save(auc_test, f"./results/{args.model}/auc/{args.dataset}_r{args.round}_auc.pt")
+
+                # --- Replacement: ensure parent directory exists before saving ---
+                save_dir = f"./results/{args.model}/auc"
+                try:
+                    os.makedirs(save_dir, exist_ok=True)
+                except Exception:
+                    # best-effort: if directory creation fails, continue to raise the original error on save
+                    pass
+                torch.save(auc_test, os.path.join(save_dir, f"{args.dataset}_r{args.round}_auc.pt"))
 
     with torch.no_grad():
         train_res,auc_trian = test_once(train_preds, train_scores, train_label)

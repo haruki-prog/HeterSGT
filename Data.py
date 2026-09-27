@@ -3,6 +3,12 @@ import collections
 import numpy as np
 from torch.utils.data import Dataset, dataloader, random_split
 
+#役割: データ入出力と学習データセットの整形を担うユーティリティ。
+# ランダムウォーク出力を学習用バッチ/マスク/ラベルに変換し、モデル訓練ループで使える形式を提供する.
+
+
+
+
 class FakenewsDataset(Dataset):
     def __init__(self, walk_list, inner_list, type_list, label_list, graph, transform=False):
         
@@ -25,37 +31,65 @@ class FakenewsDataset(Dataset):
     def __getitem__(self, idx):
         return self.walk_list[idx], self.inner_list[idx], self.type_list[idx], self.labels[idx]
 
-    def get_train_id(self, test_ratio):
+    def get_train_val_test_id(self, test_ratio=0.1, val_ratio=0.1):
+        """Split by starting news ID into disjoint train, validation, and test sets."""
         from sklearn.model_selection import train_test_split
+
+        if not 0 < test_ratio < 1 or not 0 < val_ratio < 1 - test_ratio:
+            raise ValueError("test_ratio and val_ratio must be positive and sum to less than one.")
+
         num_news = self.graph["news"].x.shape[0]
+        news_ids = list(range(num_news))
         news_labels = self.graph["news"].y
-
-        train_news, test_news, y_train, y_test = train_test_split(list(range(num_news)), news_labels, test_size=test_ratio, random_state=0)
-        
-        train_walks = []
-        test_walks = []
-        train_walk_lb = []
-        test_walk_lb = []
-        train_inner_list = []
-        test_inner_list = []
-        train_type_list = []
-        test_type_list = []
-
-        for (w, lb, in_list, t_list) in zip(self.walk_list, self.labels, self.inner_list, self.type_list):
-            if w[0] in train_news:
-                train_walks.append(w)
-                train_walk_lb.append(lb)
-                train_inner_list.append(in_list)
-                train_type_list.append(t_list)
+        # Keep the original test assignment (random_state=0), then reserve 10%
+        # of all news from the remaining pool for validation.
+        train_val_news, test_news, _, _ = train_test_split(
+            news_ids, news_labels, test_size=test_ratio, random_state=0
+        )
+        train_news, val_news = train_test_split(
+            train_val_news, test_size=val_ratio / (1 - test_ratio), random_state=0
+        )
+        split_ids = {
+            "train": set(train_news),
+            "validation": set(val_news),
+            "test": set(test_news),
+        }
+        groups = {
+            name: {"walks": [], "inner": [], "types": [], "labels": []}
+            for name in split_ids
+        }
+        for walk, label, inner, types in zip(
+            self.walk_list, self.labels, self.inner_list, self.type_list
+        ):
+            root_news = int(walk[0])
+            if root_news in split_ids["train"]:
+                group = groups["train"]
+            elif root_news in split_ids["validation"]:
+                group = groups["validation"]
+            elif root_news in split_ids["test"]:
+                group = groups["test"]
             else:
-                test_walks.append(w)
-                test_walk_lb.append(lb)
-                test_inner_list.append(in_list)
-                test_type_list.append(t_list)
+                raise ValueError(f"Walk starts at unknown news ID {root_news}.")
+            group["walks"].append(walk)
+            group["inner"].append(inner)
+            group["types"].append(types)
+            group["labels"].append(label)
 
-        train_dataset = FakenewsDataset(train_walks, train_inner_list, train_type_list, train_walk_lb, self.graph, transform=True)
-        test_dataset = FakenewsDataset(test_walks, test_inner_list, test_type_list, test_walk_lb, self.graph, transform=True)
-        return train_dataset, test_dataset
+        def make_dataset(group):
+            return FakenewsDataset(
+                group["walks"], group["inner"], group["types"], group["labels"],
+                self.graph, transform=True,
+            )
+
+        return tuple(make_dataset(groups[name]) for name in ("train", "validation", "test"))
+
+    def get_train_id(self, test_ratio):
+        """Keep the existing two-value API; expose the held-out validation set."""
+        train_data, val_data, test_data = self.get_train_val_test_id(
+            test_ratio=test_ratio, val_ratio=0.1
+        )
+        train_data.validation_data = val_data
+        return train_data, test_data
 
 class Vocab:  
     
