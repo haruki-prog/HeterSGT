@@ -1,4 +1,7 @@
 import argparse
+import random
+
+import numpy as np
 import torch
 from torch_geometric import data
 from torch.utils.data import Dataset, random_split, DataLoader
@@ -101,6 +104,12 @@ def train_with_validation(model, train_data, val_data, test_data, epochs, optimi
 if __name__ == "__main__":
     # コマンドライン引数をパース(構文解析)して `args` に格納する
     args = arg_parser()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    print(f"Random seed: {args.seed} (model and random walks; data split remains seed 0)")
     # 使用可能なら GPU（cuda）を使い、なければ CPU を使う設定を作る
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # `args` にデバイス情報を保持しておく（他の関数で参照するため）

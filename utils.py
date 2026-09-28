@@ -21,7 +21,7 @@ def load_data(args):
     # 読み込んだグラフの簡易表示（デバッグ目的）
     print(graph)
     # ランダムウォークを生成して、walk 列・ラベル・内部インデックス・タイプ列を取得する
-    walk_list,labels,inner_list,type_list = rw.rand_walk(args.dataset, args.restart, args.num_laps, args.walk_length)
+    walk_list,labels,inner_list,type_list = rw.rand_walk(args.dataset, args.restart, args.num_laps, args.walk_length, seed=args.seed)
     # 訓練/検証分割の比率（ここでは固定で 0.1 = 10% を検証用にする）
     test_ratio = 0.1
     # FakenewsDataset のインスタンスを作成する（walk_list 等を渡す）
