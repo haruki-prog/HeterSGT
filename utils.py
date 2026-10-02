@@ -21,7 +21,7 @@ def load_data(args):
     # 読み込んだグラフの簡易表示（デバッグ目的）
     print(graph)
     # ランダムウォークを生成して、walk 列・ラベル・内部インデックス・タイプ列を取得する
-    walk_list,labels,inner_list,type_list = rw.rand_walk(args.dataset, args.restart, args.num_laps, args.walk_length)
+    walk_list,labels,inner_list,type_list = rw.rand_walk(args.dataset, args.restart, args.num_laps, args.walk_length, seed=args.seed)
     # 訓練/検証分割の比率（ここでは固定で 0.1 = 10% を検証用にする）
     test_ratio = 0.1
     # FakenewsDataset のインスタンスを作成する（walk_list 等を渡す）
@@ -96,7 +96,7 @@ def print_results_once(train_result, stage="train"):
     f"{stage} Acc: {train_acc:.4f}, {stage} Pre: {train_pre_macro:.4f}, {stage} Recall: {train_recall_macro:.4f}, {stage} f1: {train_f1_macro:.4f}, {stage} auc: {train_auc_macro:.4f} \n"
     )
 
-def save_results(args, train_result):
+def save_results(args, train_result, run_index=None):
     # 結果辞書を DataFrame に変換（行一つ分として保存するためリストで包む）
     df = pd.DataFrame([train_result])
     # --- Original code (commented out) ---
@@ -105,6 +105,8 @@ def save_results(args, train_result):
     # --- Replacement: ensure parent directory exists and avoid unsupported 'encoding' kwarg ---
     # 出力ファイルパスを組み立てる（実験設定のパラメータをファイル名に含める）
     out_path = f"./results/{args.dataset}_{args.hiddenSize}_R{args.round}_WL{args.walk_length}_dp{args.dropout}_{args.num_layers}_layers_case2{args.case2}_case3{args.case3}_restart_{args.restart}_topn_{args.topn}.xlsx"
+    if run_index is not None:
+        out_path = out_path[:-5] + f'_run{run_index}_seed{args.seed}.xlsx'
     # 親ディレクトリがなければ作成する（存在確認と作成）
     try:
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -113,3 +115,60 @@ def save_results(args, train_result):
         pass
     # 結果を Excel ファイルとして保存する
     df.to_excel(out_path, index = False)
+
+
+def save_seeded_run_summary(args, run_results):
+    """Report test metrics across completed, independent seeded runs."""
+    expected_seeds = list(range(args.seed, args.seed + args.runs))
+    if len(run_results) != args.runs or [row['seed'] for row in run_results] != expected_seeds:
+        raise ValueError('A complete ordered result is required for every run seed.')
+    if [row['run_index'] for row in run_results] != list(range(1, args.runs + 1)):
+        raise ValueError('Run indices must be consecutive and start at 1.')
+
+    metrics = (
+        ('test_acc', 'Acc'),
+        ('test_pre_macro', 'Macro-Precision'),
+        ('test_recall_macro', 'Macro-Recall'),
+        ('test_f1_macro', 'Macro-F1'),
+        ('test_auc_macro', 'AUC'),
+    )
+    individual = pd.DataFrame(run_results)
+    graph_path = f'../Data/{args.dataset}/graph/{args.dataset}_{args.hiddenSize}_final.pt'
+    summary_rows = []
+    print(f'Across {args.runs} runs (seeds {expected_seeds[0]}-{expected_seeds[-1]}; fixed split seed 0; sample std, ddof=1)')
+    for key, label in metrics:
+        values = individual[key].to_numpy(dtype=float)
+        if not np.isfinite(values).all():
+            raise ValueError(f'Non-finite test result for {key}.')
+        mean = float(np.mean(values))
+        std = float(np.std(values, ddof=1))
+        summary_rows.append({
+            'metric': label,
+            'n': args.runs,
+            'mean': mean,
+            'std': std,
+            'ddof': 1,
+            'split_method': 'fixed 80/10/10, random_state=0',
+            'dataset': args.dataset,
+            'graph_path': graph_path,
+            'hidden_size': args.hiddenSize,
+            'walk_length': args.walk_length,
+            'num_layers': args.num_layers,
+            'restart': args.restart,
+            'topn': args.topn,
+            'dropout': args.dropout,
+            'round': args.round,
+            'first_seed': args.seed,
+            'runs': args.runs,
+        })
+        print(f'test {label}: {mean:.4f} ± {std:.4f} (n={args.runs}, sample std)')
+
+    stem = (f'./results/{args.dataset}_{args.hiddenSize}_R{args.round}'
+            f'_WL{args.walk_length}_dp{args.dropout}_{args.num_layers}_layers'
+            f'_case2{args.case2}_case3{args.case3}_restart_{args.restart}'
+            f'_topn_{args.topn}_runs{args.runs}_seed{args.seed}')
+    os.makedirs(os.path.dirname(stem), exist_ok=True)
+    individual.to_csv(stem + '_individual.csv', index=False)
+    pd.DataFrame(summary_rows).to_csv(stem + '_summary.csv', index=False)
+    print(f'Saved individual results: {stem}_individual.csv')
+    print(f'Saved summary: {stem}_summary.csv')

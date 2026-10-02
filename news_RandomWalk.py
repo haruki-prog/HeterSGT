@@ -152,7 +152,7 @@ def _walk_from_news(G, start, walk_length, restart, rng):
     return [str(node) for node in path]
 
 
-def rand_walk(dataset, restart, num_laps = 1, walk_length = 5):
+def rand_walk(dataset, restart, num_laps = 1, walk_length = 5, seed=None):
     G = graph.load_edgelist(f"../Data/{dataset}/graph/edges/{dataset}.edgelist", undirected=True)
     df= pd.read_excel(f"../Data/{dataset}/news_final.xlsx")
     num_news = len(df['news_id'].tolist())
@@ -160,12 +160,14 @@ def rand_walk(dataset, restart, num_laps = 1, walk_length = 5):
     labels = label * num_laps  
     print('num_laps:',num_laps,'walk_length:',walk_length,'num_news:',num_news)
    
+    # 修正: 指定シードから1つの乱数生成器を作り、全ウォークで共有する。
+    rng = random.Random(seed)
     walk_list = []
     for i in tqdm(range(num_laps),desc = 'news random walk...'):
         for j in range(num_news):
             # 修正: 開始ID 0 を真偽値で判定する DeepWalk 実装を通さず、
             # 各ウォークの先頭がラベルに対応するニュースID j になるようにする。
-            walk = _walk_from_news(G, j, walk_length, restart, random.Random())
+            walk = _walk_from_news(G, j, walk_length, restart, rng)
             walk_list.append(walk)
     
     walk_list_,dup_index = remove_dups(walk_list)
