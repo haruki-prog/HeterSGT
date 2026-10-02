@@ -138,8 +138,9 @@ def build_news_embeddings(texts, hidden_size, labels, train_indices, epochs=5, b
     print(f'News encoder device: {device}', flush=True)
     sentence_pattern = re.compile(r'(?<=[.!?])\s+')
     token_pattern = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
-    documents = [[token_pattern.findall(sentence.lower())[:64]
-                  for sentence in sentence_pattern.split(text)[:32]] for text in texts]
+    # Keep every sentence and token; processing chunks below limit padding, not article length.
+    documents = [[token_pattern.findall(sentence.lower())
+                  for sentence in sentence_pattern.split(text)] for text in texts]
     counts = Counter(word for doc in documents for sentence in doc for word in sentence)
     vocab = {word: i + 2 for i, (word, _) in enumerate(counts.most_common(30000))}
     encoded = []
@@ -169,24 +170,50 @@ def build_news_embeddings(texts, hidden_size, labels, train_indices, epochs=5, b
             self.classifier = nn.Linear(hidden_size, len(classes))
 
         def forward(self, batch):
-            batch_size, sentence_count, word_count = batch.shape
-            words = batch.reshape(-1, word_count)
-            word_states, _ = self.word_gru(self.embedding(words))
-            sentences = self.word_attention(word_states, words.ne(0))
-            sentences = sentences.reshape(batch_size, sentence_count, -1)
-            sentence_states, _ = self.sentence_gru(sentences)
-            features = self.sentence_attention(sentence_states, batch.ne(0).any(dim=-1))
+            # Pack words in similarly sized chunks to avoid padding an entire
+            # article batch to the longest sentence. No tokens are discarded.
+            flat_sentences = [sentence for doc in batch for sentence in doc]
+            order = sorted(range(len(flat_sentences)),
+                           key=lambda index: len(flat_sentences[index]), reverse=True)
+            sentence_vectors = [None] * len(flat_sentences)
+            for start in range(0, len(order), 32):
+                indices = order[start:start + 32]
+                words = [flat_sentences[index] for index in indices]
+                lengths = torch.tensor([len(sentence) for sentence in words],
+                                       dtype=torch.long)
+                padded = nn.utils.rnn.pad_sequence(words, batch_first=True).to(
+                    self.embedding.weight.device,
+                )
+                packed = nn.utils.rnn.pack_padded_sequence(
+                    self.embedding(padded), lengths, batch_first=True,
+                    enforce_sorted=True,
+                )
+                packed_states, _ = self.word_gru(packed)
+                states, _ = nn.utils.rnn.pad_packed_sequence(
+                    packed_states, batch_first=True,
+                )
+                mask = torch.arange(states.shape[1], device=states.device)[None, :] < lengths.to(states.device)[:, None]
+                vectors = self.word_attention(states, mask)
+                for position, index in enumerate(indices):
+                    sentence_vectors[index] = vectors[position]
+
+            # Each article retains its full sentence sequence, so the
+            # bidirectional sentence GRU never receives padded timesteps.
+            features = []
+            offset = 0
+            for doc in batch:
+                sentences = torch.stack(sentence_vectors[offset:offset + len(doc)]).unsqueeze(0)
+                offset += len(doc)
+                sentence_states, _ = self.sentence_gru(sentences)
+                mask = torch.ones(sentence_states.shape[:2], dtype=torch.bool,
+                                  device=sentence_states.device)
+                features.append(self.sentence_attention(sentence_states, mask).squeeze(0))
+            features = torch.stack(features)
             return features, self.classifier(features)
 
     def collate(indices):
-        selected = [encoded[i] for i in indices]
-        max_sentences = max(map(len, selected))
-        max_words = max(len(sentence) for doc in selected for sentence in doc)
-        batch = torch.zeros((len(indices), max_sentences, max_words), dtype=torch.long)
-        for row, doc in enumerate(selected):
-            for col, sentence in enumerate(doc):
-                batch[row, col, :len(sentence)] = torch.tensor(sentence)
-        return batch
+        return [[torch.tensor(sentence, dtype=torch.long)
+                 for sentence in encoded[index]] for index in indices]
 
     classes = {label: i for i, label in enumerate(sorted({labels[i] for i in train_indices}))}
     targets = torch.tensor([classes[labels[i]] for i in train_indices])
@@ -196,7 +223,7 @@ def build_news_embeddings(texts, hidden_size, labels, train_indices, epochs=5, b
         model.train()
         for indices in torch.randperm(len(train_indices)).split(batch_size):
             article_indices = train_indices[indices.tolist()].tolist()
-            _, logits = model(collate(article_indices).to(device))
+            _, logits = model(collate(article_indices))
             loss = F.cross_entropy(logits, targets[indices].to(device))
             optimizer.zero_grad()
             loss.backward()
@@ -204,7 +231,7 @@ def build_news_embeddings(texts, hidden_size, labels, train_indices, epochs=5, b
         print(f'News encoder epoch {epoch + 1}/{epochs} complete', flush=True)
     model.eval()
     with torch.no_grad():
-        features = [model(collate(list(range(start, min(start + batch_size, len(encoded))))).to(device))[0].cpu()
+        features = [model(collate(list(range(start, min(start + batch_size, len(encoded))))))[0].cpu()
                     for start in range(0, len(encoded), batch_size)]
     return torch.cat(features).numpy().astype(np.float64)
 
