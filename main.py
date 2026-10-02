@@ -10,7 +10,7 @@ import json
 import os
 from Data import Vocab, Data, FakenewsDataset
 import news_RandomWalk as rw
-from utils import load_data, test_once, print_results_once, save_results
+from utils import load_data, test_once, print_results_once, save_results, save_seeded_run_summary
 from model.Base import genX
 
 
@@ -27,9 +27,25 @@ class Config():
         for attr in self.attribute:
             print(attr)
 
+def positive_int(value):
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError('runs must be a positive integer')
+    return parsed
+
+
+def set_random_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--seed', type=int, default=7, help='Random seed.')
+    parser.add_argument('--seed', type=int, default=7, help='First random seed; run i uses seed + i - 1.')
+    parser.add_argument('--runs', type=positive_int, default=1, help='Number of independent seeded runs.')
     parser.add_argument('--dataset', type=str, default='MM COVID')
     parser.add_argument('--hiddenSize', type=int, default=600)
     parser.add_argument('--config', type=str, default='./config/HeteroSGT.json', help='configuration file name.')
@@ -45,7 +61,7 @@ def arg_parser():
     args = parser.parse_args()
     return args
 
-def train_with_validation(model, train_data, val_data, test_data, epochs, optimizer, device, args):
+def train_with_validation(model, train_data, val_data, test_data, epochs, optimizer, device, args, run_index=None):
     """Choose model weights on validation data; evaluate test data once."""
     criterion = torch.nn.CrossEntropyLoss()
     train_x = genX(train_data, device)
@@ -95,44 +111,18 @@ def train_with_validation(model, train_data, val_data, test_data, epochs, optimi
     print(f"Best validation epoch: {best_epoch}")
     print_results_once(best_val_result, "validation")
     print_results_once(test_result, "test")
-    save_results(args, test_result)
+    save_results(args, test_result, run_index=run_index)
     auc_dir = os.path.join('results', args.model, 'auc')
     os.makedirs(auc_dir, exist_ok=True)
-    torch.save(test_auc, os.path.join(auc_dir, f'{args.dataset}_r{args.round}_auc.pt'))
+    auc_suffix = f'_run{run_index}_seed{args.seed}' if run_index is not None else ''
+    torch.save(test_auc, os.path.join(auc_dir, f'{args.dataset}_r{args.round}{auc_suffix}_auc.pt'))
+    return best_epoch, best_val_result, test_result
 
 
-if __name__ == "__main__":
-    # コマンドライン引数をパース(構文解析)して `args` に格納する
-    args = arg_parser()
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+def run_single_seed(args, config, device, run_index=None):
+    # 各試行で乱数、ウォーク、モデル、optimizerを最初から作り直す。
+    set_random_seed(args.seed)
     print(f"Random seed: {args.seed} (model and random walks; data split remains seed 0)")
-    # 使用可能なら GPU（cuda）を使い、なければ CPU を使う設定を作る
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # `args` にデバイス情報を保持しておく（他の関数で参照するため）
-    args.device = device
-    # 実行時情報を一行で表示する（デバッグ・ログ用）
-    print(f"Training Device: {device}, Dataset: {args.dataset},  Model : {args.model}, Test Round: {args.round}, num_laps: {args.num_laps}, walk_length: {args.walk_length}, hiddenSize: {args.hiddenSize},num_layers: {args.num_layers}")
-
-    # 設定ファイル（JSON）を読み込み、データセットごとの Config オブジェクト群を作る
-    with open(args.config, 'r') as f:
-        config_dicts = json.load(f)
-    configs = {}
-    for config in config_dicts:
-        # JSON の各エントリを Config インスタンスに詰め替える
-        conf = Config()
-        for key, value in config.items():
-            setattr(conf, key, value)
-        configs.update({
-            config["dataset"] : conf
-        })
-    # コマンドラインで指定されたデータセット用の設定を選択する
-    config = configs[args.dataset]
-    
-    
     # グラフと学習データ・テストデータを読み込む（utils.load_data が返す）
     graph, train_data, test_data = load_data(args)
 
@@ -168,6 +158,58 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     if not hasattr(args, 'epochs'):
         args.epochs = 100
-    train_with_validation(
+    best_epoch, val_result, test_result = train_with_validation(
         model, train_data, val_data, test_data, args.epochs, optimizer, device, args,
+        run_index=run_index,
     )
+    return {
+        'run_index': run_index,
+        'seed': args.seed,
+        'best_validation_epoch': best_epoch,
+        'validation_macro_f1': float(val_result['test_f1_macro']),
+        **{key: float(test_result[key]) for key in (
+            'test_acc', 'test_pre_macro', 'test_recall_macro',
+            'test_f1_macro', 'test_auc_macro',
+        )},
+    }
+
+
+if __name__ == "__main__":
+    args = arg_parser()
+    if args.seed < 0 or args.seed + args.runs - 1 >= 2**32:
+        raise ValueError('All run seeds must be in the range [0, 2**32 - 1].')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    args.device = device
+    print(f"Training Device: {device}, Dataset: {args.dataset},  Model : {args.model}, Test Round: {args.round}, num_laps: {args.num_laps}, walk_length: {args.walk_length}, hiddenSize: {args.hiddenSize},num_layers: {args.num_layers}")
+
+    # 設定ファイル（JSON）を読み込み、データセットごとの Config オブジェクト群を作る
+    with open(args.config, 'r') as f:
+        config_dicts = json.load(f)
+    configs = {}
+    for config in config_dicts:
+        # JSON の各エントリを Config インスタンスに詰め替える
+        conf = Config()
+        for key, value in config.items():
+            setattr(conf, key, value)
+        configs.update({
+            config["dataset"] : conf
+        })
+    # コマンドラインで指定されたデータセット用の設定を選択する
+    config = configs[args.dataset]
+
+
+    args.dropout = config.dropout
+    first_seed = args.seed
+    run_results = []
+    for run_index in range(1, args.runs + 1):
+        run_args = argparse.Namespace(**vars(args))
+        run_args.seed = first_seed + run_index - 1
+        if args.runs > 1:
+            print(f"Run {run_index}/{args.runs}, seed={run_args.seed}", flush=True)
+        run_results.append(run_single_seed(
+            run_args, config, device,
+            run_index=run_index if args.runs > 1 else None,
+        ))
+
+    if args.runs > 1:
+        save_seeded_run_summary(args, run_results)
