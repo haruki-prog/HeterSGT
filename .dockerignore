@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+venv311/
+results/
+*.pdf
+*.pt
+*.npy
+*.xlsx
+*.csv
+.DS_Store

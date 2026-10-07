@@ -1,0 +1,23 @@
+x-heterosgt: &heterosgt
+  build: .
+  image: heterosgt:local
+  working_dir: /workspace/HeterSGT
+  user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+  volumes:
+    - .:/workspace/HeterSGT
+    - ../Data:/workspace/Data
+  environment:
+    HF_HOME: /workspace/Data/.cache/huggingface
+    XDG_CACHE_HOME: /workspace/Data/.cache
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+    USER: heterosgt
+    LOGNAME: heterosgt
+
+services:
+  cpu:
+    <<: *heterosgt
+  gpu:
+    <<: *heterosgt
+    profiles: [gpu]
+    gpus: all
